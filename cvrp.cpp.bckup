@@ -1,0 +1,325 @@
+#include "cvrp.h"
+
+bool heuristic(Costumer *a, Costumer *b){	
+    return a->cost < b->cost;
+}
+
+CVRP::CVRP(){};
+
+void CVRP::load_solomon_instance(string path){
+	ifstream input(path);
+	int id, x, y, demand, rtime, dtime, stime;
+	
+	if(!input){
+		cerr << "File could not be opened." << endl;
+		return;
+	}
+	
+	input >> dep.nVehicles >> dep.cap;
+	input >> id >> dep.coord->x >> dep.coord->y >> demand >> rtime >> dtime >> stime;
+	
+	while(input >> id >> x >> y >> demand >> rtime >> dtime >> stime){
+		Point *temp = new Point(x, y);
+		Costumer *c = new Costumer(id, temp, demand, rtime, dtime, stime);
+		clients.push_back(c);
+	}
+	
+	visited = vector<bool>(clients.size(),false);
+}
+
+void CVRP::load_cordeau_instance(string path){
+	ifstream input(path);
+	int id, x, y, demand, rtime, dtime, stime;
+	
+	if(!input){
+		cerr << "File could not be opened." << endl;
+		return;
+	}
+	
+	input >> dep.nVehicles >> dep.cap;
+	input >> id >> dep.coord->x >> dep.coord->y >> stime >> demand >> rtime >> dtime;
+	string str;
+	while(getline(input, str)){
+		vector<string> elems;
+    	stringstream ss(str);
+    	string item;
+    
+    	while(getline(ss, item, ' ')){
+	        elems.push_back(item);
+	    }
+	    Point *temp = new Point(stoi(elems[1]), stoi(elems[2]));
+		Costumer *c = new Costumer(stoi(elems[0]) , temp, stoi(elems[4]), stoi(elems[5]), stoi(elems[6]), stoi(elems[3]));
+		clients.push_back(c);
+	}
+	
+	visited = vector<bool>(clients.size(),false);
+}
+
+double CVRP::calculate_cost(Point *org, Point *dest){
+	return sqrt(pow(dest->x - org->x,2) + pow(dest->y - org->y,2));
+}
+//Deduction for the number of vehicles
+int CVRP::deduce_nVehicles(int gama){
+	int sum = 0;
+	
+	for(Costumer* c : clients){
+		sum += c->demand;
+	}
+
+	return (int)(sum/dep.cap) + gama;
+}
+//angle of 2 points from dot product 0-360 degrees
+double CVRP::angle_b2p(Point* a, Point* b){
+	int dprod = (a->x * b->x) + (a->y * b->y);
+	double anorm = sqrt(a->x*a->x + a->y*a->y);
+	double bnorm = sqrt(b->x*b->x + b->y*b->y);
+	
+	return acos(dprod/(anorm*bnorm))*360;	
+}
+
+vector<vector<Costumer*> > CVRP::update_list(vector<Route*> &solution, vector<double> &times, int &n){
+	vector<Costumer*>::iterator itr = clients.begin();
+	vector<vector<Costumer*> > candidates(solution.size(), vector<Costumer*> ());
+	
+	for(; itr != clients.end(); itr++){
+		Costumer* co = *(itr);
+		
+		for(int r = 0; r < solution.size(); r++){
+			//candidates[r].clear(); //Erro aqui!!! Nao esquece!!!
+
+			if(!solution[r]->clients.empty()){
+				int c = solution[r]->clients.size()-1;
+				Costumer* org = solution[r]->clients[c];
+				int cost = calculate_cost(org->coord, co->coord);
+				//Time arrival to verify if the vehicle can get to the client before the due time
+				double arrivalTime = times[r] + cost;
+				//cout << arrivalTime << endl;
+				//Verify if the client wasn't visited and if the vehicle is on time
+				if(!visited[co->id - 1] && co->id != org->id && co->dTime >= arrivalTime){
+					co->ratio = calculate_cost(co->coord, dep.coord) + cost; 
+					co->cost = cost;
+					co->arrTime = arrivalTime;
+					candidates[r].push_back(co); 
+				}
+			}
+		}
+	}
+
+	for(int i = 0; i < candidates.size(); i++){
+		if(candidates[i].size() != 0){
+			return candidates;	
+		}	
+	}
+	
+	candidates.push_back(vector<Costumer*> ());
+	int k = candidates.size() - 1;
+
+	for(int i = 0; i < clients.size(); i++){
+		Costumer *cos = clients[i];
+		if(!visited[cos->id - 1]){
+			int cost = calculate_cost(dep.coord, cos->coord);
+		
+			if(candidates[k].empty()){
+				candidates[k].push_back(cos);
+			}else if(candidates[k][0]->cost > cost){
+				candidates[k][0] = cos;
+			}
+		}
+	}	
+	visited.push_back(false);
+	visited[candidates[k][0]->id - 1] = true;	
+	times.push_back(0.0);
+	times[k] += candidates[k][0]->cost + candidates[k][0]->servTime;
+	candidates[k][0]->arrTime = candidates[k][0]->cost;
+	n++;
+	solution.push_back(new Route);
+	solution[solution.size()-1]->clients.push_back(candidates[k][0]);
+	 
+	return candidates;
+}
+
+void CVRP::select_candidate(vector<Route*> &solution, vector<vector<Costumer*> > &candidates, vector<double> &times, vector<int> &route_capacity, int &n){
+	bool rem_from_r;
+	//Estou supondo que apos o termino do for mais externo, nao irao existir mais candidatos repetidos para as outras rotas
+	//for each route r
+	for(int r = 0; r < solution.size(); r++){
+		if(!solution[r]->clients.empty() && !candidates[r].empty()){
+			Costumer* cand = candidates[r][0];
+			int s = solution[r]->clients.size()-1;
+			Costumer* last_added_r = solution[r]->clients[s];
+			rem_from_r = false;
+		
+			//Verify if there's equal candidates in other routes
+			for(int p = 0; p < solution.size(); p++){
+				if(p != r && !solution[p]->clients.empty() && !candidates[p].empty()){
+					Costumer* temp = *(candidates[p].begin());
+					//if exists equal candidate in other route
+					if(cand->id == temp->id){
+						int s1 = solution[p]->clients.size()-1;
+						Costumer* last_added_p = solution[p]->clients[s1];
+					
+						int time_r, time_p;
+						//compare which has the best service finish time
+						time_r = last_added_r->arrTime + last_added_r->servTime;
+						time_p = last_added_p->arrTime + last_added_p->servTime;
+						//if the tested route is better, remove the candidate from the first route
+						if(time_p > time_r){
+							if(!rem_from_r){ //if it was not removed, remove from the original route
+								candidates[r].erase(candidates[r].begin());
+								rem_from_r = true;
+							}
+						}else{ 	//else remove from the route p
+							candidates[p].erase(candidates[p].begin());
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	for(int r = 0; r < solution.size(); r++){
+		if(!solution[r]->clients.empty() && !candidates[r].empty()){
+			Costumer* cand = candidates[r][0];
+			if(!visited[cand->id - 1]){
+				//Update time
+				double waitTime = 0.0;
+		
+				if(cand->rTime > cand->arrTime){
+					waitTime = cand->rTime - cand->arrTime; 	
+				}
+				//Time = arrivalTime + serviceTime + waitTime
+				times[r] = cand->arrTime + cand->servTime + waitTime;
+				//Add the client to the solution and set as visited
+				solution[r]->clients.push_back(cand);
+				visited[cand->id - 1] = true;
+				n++;
+			}
+		}
+	}
+}
+
+//Select initial clients from each 360/nV angle
+void CVRP::init_solution(vector<Route*> &solution, vector<double> &time, vector<int> &route_capacity, int &n){
+	double angle = 360/dep.nVehicles;
+	
+	for(int i = 0; i < clients.size(); i++){
+		//Angle between the deposit and the i-th client
+		double ang_b2p = angle_b2p(dep.coord, clients[i]->coord);
+		//Calculate pos of Ci
+		double posd = ang_b2p/angle;
+		int pos = ceil(posd);
+		
+		int cost = calculate_cost(dep.coord, clients[i]->coord);
+		
+		clients[i]->cost = cost;
+				
+		if(solution[pos]->clients.size() == 0){
+			solution[pos]->clients.push_back(clients[i]);
+			route_capacity[pos] = clients[i]->demand;
+			time[pos] = clients[i]->cost;
+		}else if(cost < solution[pos]->clients[0]->cost){	//if the client i is better than the i - 1 for that route
+			solution[pos]->clients[0] = clients[i];
+			route_capacity[pos] = clients[i]->demand;
+			time[pos] = clients[i]->cost;
+		}
+	}
+	
+	for(int r = 0; r < solution.size(); r++){
+		if(!solution[r]->clients.empty()){
+			visited[solution[r]->clients[0]->id - 1] = true;	
+			time[r] += solution[r]->clients[0]->cost + solution[r]->clients[0]->servTime;
+			solution[r]->clients[0]->arrTime = solution[r]->clients[0]->cost;
+			n++;
+		}
+	}
+}
+
+void CVRP::candidate_solution(){
+	int n = 0;
+	double waitTime = 0.0;
+	int nVehi = deduce_nVehicles(0);
+	vector<Route*> solution(nVehi, new Route);
+	vector<int> route_capacity(nVehi, 0);
+	vector<double> routes_times(nVehi, 0.0);
+	vector<vector<Costumer*> > sol_candidates(solution.size(), vector<Costumer*> ());
+	
+	dep.nVehicles = nVehi;
+		
+	for(int i = 0; i < solution.size(); i++){
+		solution[i] = new Route;
+	}
+	//Initialize the solution with nearby close clients
+	init_solution(solution, routes_times, route_capacity, n);
+
+	while(n != clients.size()){
+		//Update the list of candidates
+		sol_candidates = update_list(solution, routes_times, n);
+	
+		for(int c = 0; c < sol_candidates.size(); c++){
+			sort(sol_candidates[c].begin(), sol_candidates[c].end(), heuristic);
+		}
+		
+		select_candidate(solution, sol_candidates, routes_times, route_capacity, n);
+	}
+	double sum = 0.0;	
+	cout << "Solution size: " << solution.size() << endl;
+	for(Route *r : solution){
+		for(Costumer *c : r->clients){
+			sum += c->cost;
+			cout << c->id << " ";
+		}
+		cout << endl;
+	}
+	cout << sum << endl;
+	
+	cout << endl;
+	/*for(int i = 0; i < solution.size(); i++){
+		solution[i]->clients.push_front(new Costumer(0, dep.coord,0,0,0,0));
+		solution[i]->clients.push_back(new Costumer(0, dep.coord,0,0,0,0));
+	}*/
+	sol = solution;
+
+	save();
+}
+
+void CVRP::save(){
+	string str;
+	string n = "CVRPwTW";
+	string ext = ".dat";
+	
+	for(int r = 0; r < sol.size(); r++){
+		
+		if(r > 9){
+			char nm = '0' + 1;
+			int k = r - 10;
+			char nm1 = '0' + k;
+			str = n + nm + nm1 + ext;
+		}else{
+			char nm = '0' + r;
+			str = n + nm + ext;
+		}
+
+		ofstream out(str);
+		out << dep.coord->x << '\t' << dep.coord->y << endl;
+		for(int c = 0; c < sol[r]->clients.size(); c++){
+			out << sol[r]->clients[c]->coord->x << '\t' << sol[r]->clients[c]->coord->y << endl; 
+			
+		}
+		out << dep.coord->x << '\t' << dep.coord->y << endl;
+		out.clear();
+		
+	}
+}
+
+void CVRP::print(){
+	cout << "Deposit:" << endl;
+	cout << dep.id << " " << dep.coord->x << " " << dep.coord->y << " " << dep.nVehicles << " " << dep.cap << endl;
+	cout << endl;
+	cout << "Clients:" << endl;
+	vector<Costumer*>::iterator itr = clients.begin();
+	for(;itr != clients.end(); itr++){
+		cout << (*(itr))->id << " " << (*(itr))->coord->x << " " << (*(itr))->coord->y << " " << (*(itr))->rTime << " " << (*(itr))->dTime << " " << (*(itr))->demand << " " << (*(itr))->servTime << endl;
+	} 
+}
+
+CVRP::~CVRP(){};
